@@ -90,6 +90,7 @@ router.put('/by-invoice-id/:invoiceId', auth, async (req, res) => {
 
     res.json(invoice);
   } catch (err) {
+    console.error(err);
     res.status(400).json({ error: 'Failed to update invoice' });
   }
 });

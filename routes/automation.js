@@ -3,6 +3,8 @@ const axios = require('axios');
 const nodemailer = require('nodemailer');
 const auth = require('../middleware/auth');
 const Invoice = require('../models/invoice');
+const dotenv = require('dotenv');
+dotenv.config();
 
 const router = express.Router();
 const transporter = nodemailer.createTransport({
@@ -12,6 +14,11 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASSWORD,
   },
 });
+
+// Check for required environment variables
+if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+  throw new Error('Email user or password not defined in environment variables');
+}
 
 // Utility Function to Send Email
 async function sendEmail(to, subject, html) {
@@ -26,7 +33,12 @@ async function sendEmail(to, subject, html) {
     html,
   };
 
-  return transporter.sendMail(mailOptions);
+  try {
+    return await transporter.sendMail(mailOptions);
+  } catch (error) {
+    console.error('Error sending email:', error);
+    throw new Error('Failed to send email');
+  }
 }
 
 // Trigger Overdue Notifications
@@ -46,25 +58,30 @@ router.post('/trigger-overdue', auth, async (req, res) => {
       overdueInvoices.map(async (invoice) => {
         const recipientEmail = req.body.email;
 
-        if (!recipientEmail || typeof recipientEmail !== 'string') {
-          console.error(`No recipient defined for invoice ${invoice.invoiceId}`);
+        if (!recipientEmail || typeof recipientEmail !== 'string' || !/\S+@\S+\.\S+/.test(recipientEmail)) {
+          console.error(`No recipient defined for invoice ${invoice.invoiceId}. Recipient email: ${recipientEmail}`);
           return null; // Skip processing this invoice
         }
 
-        await sendEmail(
-          recipientEmail,
-          'Invoice Overdue Notice',
-          `
-            <h1>Invoice Overdue Notice</h1>
-            <p>Dear ${recipientEmail},</p>
-            <p>This is a reminder that invoice ${invoice.invoiceId} for amount $${invoice.amount} is overdue.</p>
-            <p>Due Date: ${new Date(invoice.dueDate).toLocaleDateString()}</p>
-            <p>Please process the payment as soon as possible.</p>
-            <br>
-            <p>Best regards,</p>
-            <p>${req.user.name}</p>
-          `
-        );
+        try {
+          await sendEmail(
+            recipientEmail,
+            'Invoice Overdue Notice',
+            `
+              <h1>Invoice Overdue Notice</h1>
+              <p>Dear ${recipientEmail},</p>
+              <p>This is a reminder that invoice ${invoice.invoiceId} for amount $${invoice.amount} is overdue.</p>
+              <p>Due Date: ${new Date(invoice.dueDate).toLocaleDateString()}</p>
+              <p>Please process the payment as soon as possible.</p>
+              <br>
+              <p>Best regards,</p>
+              <p>${req.user.name}</p>
+            `
+          );
+        } catch (error) {
+          console.error(`Failed to send overdue notice for invoice ${invoice.invoiceId}:`, error);
+          return null; // Skip processing this invoice
+        }
 
         if (process.env.ZAPIER_WEBHOOK_URL) {
           await axios.post(process.env.ZAPIER_WEBHOOK_URL, {
@@ -98,7 +115,12 @@ router.post('/trigger-overdue', auth, async (req, res) => {
 });
 router.post('/trigger-reminder', auth, async (req, res) => {
   try {
-    const { invoiceId } = req.body;
+    const { invoiceId, email: recipientEmail } = req.body;
+
+    if (!recipientEmail || typeof recipientEmail !== 'string' || !/\S+@\S+\.\S+/.test(recipientEmail)) {
+      return res.status(400).json({ error: 'Recipient email is missing or invalid' });
+    }
+
     const invoice = await Invoice.findOne({
       invoiceId,
       userId: req.user._id,
@@ -108,27 +130,26 @@ router.post('/trigger-reminder', auth, async (req, res) => {
       return res.status(404).json({ error: 'Invoice not found' });
     }
 
-    const recipientEmail = req.body.email;
-
-    if (!recipientEmail || typeof recipientEmail !== 'string') {
-      return res.status(400).json({ error: 'Recipient email is missing or invalid for the selected invoice' });
-    }
-
     // Send Reminder Email
-    await sendEmail(
-      recipientEmail,
-      'Payment Reminder',
-      `
-        <h1>Payment Reminder</h1>
-        <p>Dear ${recipientEmail},</p>
-        <p>This is a friendly reminder about invoice ${invoice.invoiceId} for amount $${invoice.amount}.</p>
-        <p>Due Date: ${new Date(invoice.dueDate).toLocaleDateString()}</p>
-        <p>Please process the payment before the due date.</p>
-        <br>
-        <p>Best regards,</p>
-        <p>${req.user.name}</p>
-      `
-    );
+    try {
+      await sendEmail(
+        recipientEmail,
+        'Payment Reminder',
+        `
+          <h1>Payment Reminder</h1>
+          <p>Dear ${recipientEmail},</p>
+          <p>This is a friendly reminder about invoice ${invoice.invoiceId} for amount $${invoice.amount}.</p>
+          <p>Due Date: ${new Date(invoice.dueDate).toLocaleDateString()}</p>
+          <p>Please process the payment before the due date.</p>
+          <br>
+          <p>Best regards,</p>
+          <p>${req.user.name}</p>
+        `
+      );
+    } catch (error) {
+      console.error(`Failed to send reminder for invoice ${invoice.invoiceId}:`, error);
+      return res.status(500).json({ error: 'Failed to send payment reminder' });
+    }
     if (process.env.ZAPIER_WEBHOOK_URL) {
       await axios.post(process.env.ZAPIER_WEBHOOK_URL, {
         type: 'PAYMENT_REMINDER',
